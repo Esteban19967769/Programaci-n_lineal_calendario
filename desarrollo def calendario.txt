@@ -1,0 +1,275 @@
+
+
+--SE HACE UN RANKING DE LOS GRUPOS MAS VENDIDOS EL ULTIMO MES (PARA NO TENER UN GRUPO DEL AÑO PASADO QUE QUIZAS YA EXPIRO)
+
+create or replace table `sod-cl-bi-sandbox.sbx_crm_symphony_diarios_temporales.tbl_pp_fcom_test` as
+with category_path as (
+  SELECT hier_group_cd, hier_family_name, seller_sku_id, hier_group_name, hier_set_cd, hier_set_name, sku_id, PRODUCT_L1_CATEGORY_PATHS
+  , SPLIT(PRODUCT_L2_CATEGORY_PATHS, '","') PRODUCT_L2_CATEGORY_PATHS
+  --, SPLIT(PRODUCT_L3_CATEGORY_PATHS, '","') PRODUCT_L2_CATEGORY_PATHS
+  --, SPLIT(PRODUCT_PARENT_CATEGORY_PATHS, '","') PRODUCT_L2_CATEGORY_PATHS
+  FROM `sodone.trf_cl.fcom_facl_prod_feed` sk
+  inner join (select * from `sodone.trf_cl.item_dim` where business_unit_id = 'SOD' and country_id = 'CL') t2 on trim(sk.seller_sku_id) = trim(t2.item_sku_num)
+  WHERE PARTITION_DATE = current_date and sk.seller_name = "SODIMAC" and PRODUCT_IS_PUBLISHED    = true
+  order by 3
+),
+
+rank_grupo as (select familia, cod_sku_dv, cod_familia, grupo, cod_grupo, sum(unidades) sum_unidades, sum(venta_con_iva) sum_venta_iva,
+rank() over(partition by familia  --ordename por hier_subfamily_cd
+                      order by sum(venta_con_iva) desc) as rank,
+from sod-cl-bi-sandbox.bi_ba_prod.transaccional_marcas  F
+left join category_path t on t.seller_sku_id=F.cod_sku_dv
+where fecha between Date_sub(current_date, interval 1 month) and current_date --para TENER LOS SKU ACTUALIZADOS Y LOS GRUPOS TAMBIEN
+  AND unidades>0 and PRECIO_PROMEDIO>1000 --and location_name in ("E-Commerce") 
+  and publicable_sku in ("SI") AND NEGOCIO IN ("SODIMAC")
+  and perfil NOT in ("CARTERIZADO") 
+  and perfil in ("HOGAR") and unidades>1 --PARA QUE NO SE VENDAN POCAS UNIDADES
+  --AND FAMILIA IN ("MUEBLES")
+  group by 1,2,3,4,5
+  order by 1, 7 asc)
+
+,category_path_final as (
+  select distinct PRODUCT_L1_CATEGORY_PATHS, hier_group_cd, hier_family_name, hier_group_name, hier_set_cd, hier_set_name, categoria, sum(venta_con_iva) venta_con_iva, 
+  from category_path t
+  left join sod-cl-bi-sandbox.bi_ba_prod.transaccional_marcas Z ON Z.cod_sku_dv=t.seller_sku_id
+  left join rank_grupo F on t.seller_sku_id=F.cod_sku_dv
+, unnest(PRODUCT_L2_CATEGORY_PATHS) categoria
+  group by 1,2,3,4,5,6,7
+  order by 3
+)
+, rankeo as (
+  select distinct t1.hier_group_cd, t1.hier_family_name, t1.hier_group_name, t1.PRODUCT_L1_CATEGORY_PATHS
+  , replace(array_reverse(SPLIT(categoria, '/'))[offset(0)],'"','') categoria, sum(t1.venta_con_iva) as venta_con_iva 
+  from category_path_final t1
+  --inner join (select hier_group_cd, max(skus) skus from category_path_final group by 1) t2 on t1.hier_group_cd = t2.hier_group_cd and t1.skus = t2.skus
+  group by 1,2,3,4,5
+  order by 1
+)
+
+, final as (
+  select *, row_number() over(partition by hier_group_cd order by venta_con_iva desc) match from rankeo
+)
+select * from final t1
+where match = 1
+order by 1 ASC
+;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+--SE HACE UN RANKING DE LAS MEJORES CATEGORIAS DENTRO DE LAS FAMILIAS Y SE ELIGEN LAS TOP1 PARA ASI TENER CATEGORIAS UNICAS FCOM
+#Y NO SE TOPEN)
+
+
+create or replace table `sod-cl-bi-sandbox.sbx_crm_symphony_diarios_temporales.tbl_pp_fcom_test2` as
+with rank2 as (select hier_group_cd, hier_family_name, left(hier_group_cd,4) as hier_family_cd, hier_group_name, PRODUCT_L1_CATEGORY_PATHS, categoria, venta_con_iva,
+rank() over(partition by categoria, left(hier_group_cd,4)  
+                      order by sum(venta_con_iva) desc) as rank,
+                      
+from sod-cl-bi-sandbox.sbx_crm_symphony_diarios_temporales.tbl_pp_fcom_test F
+  group by 1,2,3,4,5,6,7
+  order by 1 asc),
+
+best_cat_x_fam as (select * from rank2 
+where rank=1
+--and hier_group_cd like "0103%"
+order by 2)
+
+select * except(rank), rank() over(partition by hier_family_cd
+                      order by sum(venta_con_iva) desc) as rank_sku_cat_x_fam from best_cat_x_fam
+group by 1,2,3,4,5,6,7
+
+
+--PARA CADA GRUPO NECESITO QUE HAYAN CATEGORIAS DIFERENTES
+;
+
+
+
+
+
+
+
+--REVISAR EL RANKING DE LAS FAMILIAS PARA QUE A LAS MAS POBRES DE CATEGORIAS UNIAS SE ASGINEN NUMEROS FIJOS EN EL CSV PREVIO A SUBIR EL CALENDARIO A GCP COMO
+--OBRAGRUESA, FIERRO, ILUMINACION, ETC
+with rank2 as (select hier_group_cd, left(hier_group_cd,4) as hier_family_cd, hier_family_name, hier_group_name, PRODUCT_L1_CATEGORY_PATHS, categoria, venta_con_iva,
+rank() over(partition by categoria, left(hier_group_cd,4)  
+                      order by sum(venta_con_iva) desc) as rank,
+                      
+from sod-cl-bi-sandbox.sbx_crm_symphony_diarios_temporales.tbl_pp_fcom_test F
+  group by 1,2,3,4,5,6,7
+  order by 1 asc),
+
+best_cat_x_fam as (select * from rank2 
+where rank=1
+--and hier_group_cd like "0103%"
+order by 2),
+
+test as (select * except(rank), rank() over(partition by hier_family_cd
+                      order by sum(venta_con_iva) desc) as rank_sku_cat_x_fam from best_cat_x_fam
+group by 1,2,3,4,5,6,7)
+
+
+select count(categoria) as max_cat_dif_disponibles, sum(venta_con_iva) as cant_sku,hier_family_cd,hier_family_name from test
+group by 3,4
+order by 1
+
+--PARA CADA GRUPO NECESITO QUE HAYAN CATEGORIAS DIFERENTES
+;
+--select * from sod-cl-bi-sandbox.sbx_crm_symphony_diarios_temporales.tbl_pp_fcom_test2
+--where hier_family_name like ("%ASEO%")
+--order by 8
+
+--QUERY DEFINITIVA UNICA TODO EN UNOOOOOOOOOOO
+
+create or replace table sod-cl-bi-sandbox.sbx_crm_eeduarlopez_desarrollos.calendario_mayo2024_hc as
+
+with sku_fcom as (select sku_id, product_id, seller_sku_id, sku_id_url, partition_date, SELLER_NAME, PRODUCT_IS_PUBLISHED from `sodone.trf_cl.fcom_facl_prod_feed` 
+where partition_date=current_date
+and SELLER_NAME = 'SODIMAC' and PRODUCT_IS_PUBLISHED = true),
+
+rank_sku as (select familia, cod_familia, grupo, cod_grupo,sku_id, cod_sku_dv, sum(unidades) sum_unidades, sum(venta_con_iva) sum_venta_iva,
+rank() over(partition by familia  --ordename por hier_subfamily_cd
+                      order by sum(venta_con_iva) desc) as rank,                 
+from sod-cl-bi-sandbox.bi_ba_prod.transaccional_marcas  F
+left join sku_fcom t on t.seller_sku_id=F.cod_sku_dv
+where fecha between Date_sub(current_date, interval 1 month) and current_date
+  AND unidades>0 and PRECIO_PROMEDIO>5000 and location_name in ("E-Commerce") and publicable_sku in ("SI") AND NEGOCIO IN ("SODIMAC")
+  and perfil NOT in ("CARTERIZADO") 
+  and perfil in ("HOGAR") and unidades>1 --PARA QUE NO SE VENDAN POCAS UNIDADES
+  group by 1,2,3,4,5,6
+  order by 1, 8 asc),
+
+categorias_fcom_2_banners as (select DISTINCT hier_group_cd, hier_family_name, hier_group_name, rank_sku_cat_x_fam, PRODUCT_L1_CATEGORY_PATHS,
+replace(replace(replace((SUBSTRING(categoria, INSTR(categoria, '/') + LENGTH('/'))),"||","/")," ","-"),'"', '') PRODUCT_L2_CATEGORY_PATHS, --para encontrar la posición de la cadena en la palabra y luego extraer la parte de la palabra después de esa posición
+concat("https://sodimac.falabella.com/sodimac-cl/category/",replace(replace(replace((SUBSTRING(categoria, INSTR(categoria, '/') + LENGTH('/'))),"||","/")," ","-"),'"', ''),"?exp=sodimac") as URL_CATEGORY
+FROM sod-cl-bi-sandbox.sbx_crm_symphony_diarios_temporales.tbl_pp_fcom_test2)
+
+select t1.* except(N_rank1,N_rank2,N_rank3,N_rank4,N_rank5,N_rank6,N_rank7),
+--VITRINA
+t8.hier_group_cd as GRUPO_VITRINA_DESTACADO,
+t8.hier_group_name as CODIGO_VITRINA_DESTACADO,
+
+t2.sku_id as PRODUCTO_DESTACADO, 
+concat(t5.sku_id_url,"?exp=sodimac") as URL_SKU_1,
+
+t3.sku_id as BACK_UP_PRODUCTO_DESTACADO_1, 
+concat(t6.sku_id_url,"?exp=sodimac") as URL_BACK_UP_PRODUCTO_1,
+
+t4.sku_id as BACK_UP_PRODUCTO_DESTACADO_2, 
+concat(t7.sku_id_url,"?exp=sodimac") as URL_BACK_UP_PRODUCTO_2,
+
+--BANNERS EL BANNER_1 ES EL GRUPO DE LA VITRINA DESTACADA
+t8.hier_group_cd as BANNER_1_COD_GRUPO,
+t8.hier_group_name as BANNER_1_NOMBRE_CONJUNTO_GRUPO,
+t8.PRODUCT_L2_CATEGORY_PATHS NOMBRE_CATEGORIA_1_FCOM,
+t8.URL_CATEGORY URL_BANNER_1_GRUPO,
+
+t9.hier_group_cd as BANNER_2_COD_GRUPO,
+t9.hier_group_name as BANNER_2_NOMBRE_CONJUNTO_GRUPO,
+t9.PRODUCT_L2_CATEGORY_PATHS NOMBRE_CATEGORIA_2_FCOM,
+t9.URL_CATEGORY URL_BANNER_2_GRUPO,
+
+t10.hier_group_cd as BANNER_3_COD_GRUPO,
+t10.hier_group_name as BANNER_3_NOMBRE_CONJUNTO_GRUPO,
+t10.PRODUCT_L2_CATEGORY_PATHS NOMBRE_CATEGORIA_3_FCOM,
+t10.URL_CATEGORY URL_BANNER_3_GRUPO,
+
+t11.hier_group_cd as BANNER_4_COD_GRUPO,
+t11.hier_group_name as BANNER_4_NOMBRE_CONJUNTO_GRUPO,
+t11.PRODUCT_L2_CATEGORY_PATHS NOMBRE_CATEGORIA_4_FCOM,
+t11.URL_CATEGORY URL_BANNER_4_GRUPO,
+
+--BANNERS COMPLEMENTARIOS
+t12.hier_group_cd  as COD_CATEGORIA_COMPLEMENTARIA_1,
+t12.hier_group_name as NOMBRE_CATEGORIA_COMPLEMENTARIA_1,
+t12.PRODUCT_L2_CATEGORY_PATHS as NOMBRE_CATEGORIA_COMPLEMENTARIA_1_FCOM,
+t12.URL_CATEGORY as URL_BANNER_COMPLEMENTARIO_1_GRUPO,
+
+t13.hier_group_cd  as COD_CATEGORIA_COMPLEMENTARIA_2,
+t13.hier_group_name as NOMBRE_CATEGORIA_COMPLEMENTARIA_2,
+t13.PRODUCT_L2_CATEGORY_PATHS as NOMBRE_CATEGORIA_COMPLEMENTARIA_2_FCOM,
+t13.URL_CATEGORY as URL_BANNER_COMPLEMENTARIO_2_GRUPO,
+
+t14.hier_group_cd  as COD_CATEGORIA_COMPLEMENTARIA_3,
+t14.hier_group_name as NOMBRE_CATEGORIA_COMPLEMENTARIA_3,
+t14.PRODUCT_L2_CATEGORY_PATHS as NOMBRE_CATEGORIA_COMPLEMENTARIA_3_FCOM,
+t14.URL_CATEGORY as URL_BANNER_COMPLEMENTARIO_3_GRUPO,
+
+--CALENDARIO CON SOLO LOS N_RANK
+from sod-cl-bi-sandbox.sbx_crm_eeduarlopez_desarrollos.deftest_calendario_hc_202405 t1
+--TOP SKUS Y SUS URL
+left join rank_sku t2 on t1.familia=trim(t2.familia) AND (t1.N_rank1=t2.rank)
+left join rank_sku t3 on t1.familia=trim(t3.familia) AND (t1.N_rank2=t3.rank)
+left join rank_sku t4 on t1.familia=trim(t4.familia) AND (t1.N_rank3=t4.rank)
+left join sku_fcom  T5 on t2.cod_sku_dv=t5.seller_sku_id
+left join sku_fcom  t6 on t3.cod_sku_dv=T6.seller_sku_id
+left join sku_fcom  t7 on t4.cod_sku_dv=t7.seller_sku_id
+--LOS GRUPOS; LOS SACAMOS DE FCOM_TEST
+LEFT JOIN categorias_fcom_2_banners T8 on trim(t8.hier_family_name)=t1.familia AND (t1.N_rank1=t8.rank_sku_cat_x_fam)
+LEFT JOIN categorias_fcom_2_banners T9 on trim(t9.hier_family_name)=t1.familia AND (t1.N_rank2=t9.rank_sku_cat_x_fam)
+LEFT JOIN categorias_fcom_2_banners T10 on trim(t10.hier_family_name)=t1.familia AND (t1.N_rank3=t10.rank_sku_cat_x_fam)
+LEFT JOIN categorias_fcom_2_banners t11 on trim(t11.hier_family_name)=t1.familia AND (t1.N_rank4=t11.rank_sku_cat_x_fam)
+LEFT JOIN categorias_fcom_2_banners T12 on trim(t12.hier_family_name)=t1.familia AND (t1.N_rank5=t12.rank_sku_cat_x_fam)
+LEFT JOIN categorias_fcom_2_banners T13 on trim(t13.hier_family_name)=t1.familia AND (t1.N_rank6=t13.rank_sku_cat_x_fam)
+LEFT JOIN categorias_fcom_2_banners T14 on trim(t14.hier_family_name)=t1.familia AND (t1.N_rank7=t14.rank_sku_cat_x_fam)
+
+order by 1
+
+;
+
+create or replace table sod-cl-bi-sandbox.sbx_crm_eeduarlopez_desarrollos.calendario_mayo2024_hc_final as
+select
+fecha	dia,	familia,	
+GRUPO_VITRINA_DESTACADO,	
+CODIGO_VITRINA_DESTACADO,	
+PRODUCTO_DESTACADO,	
+replace(replace(replace(URL_SKU_1,"falabella-cl","sodimac-cl"),"www.falabella.com","www.sodimac.falabella.com"),"www.","") URL_SKU_1,	
+BACK_UP_PRODUCTO_DESTACADO_1,	
+replace(replace(replace(URL_BACK_UP_PRODUCTO_1,"falabella-cl","sodimac-cl"),"www.falabella.com","www.sodimac.falabella.com"),"www.","") URL_BACK_UP_PRODUCTO_1,	
+BACK_UP_PRODUCTO_DESTACADO_2,	
+replace(replace(replace(URL_BACK_UP_PRODUCTO_2,"falabella-cl","sodimac-cl"),"www.falabella.com","www.sodimac.falabella.com"),"www.","") URL_BACK_UP_PRODUCTO_2,	
+BANNER_1_COD_GRUPO,	
+BANNER_1_NOMBRE_CONJUNTO_GRUPO,	
+upper(replace(replace(replace((SUBSTRING(NOMBRE_CATEGORIA_1_FCOM, INSTR(NOMBRE_CATEGORIA_1_FCOM, '/') + LENGTH('/'))),"||","/")," ","-"),'-', ' ')) NOMBRE_CATEGORIA_1_FCOM,	
+URL_BANNER_1_GRUPO,	
+BANNER_2_COD_GRUPO,	
+BANNER_2_NOMBRE_CONJUNTO_GRUPO,
+upper(replace(replace(replace((SUBSTRING(NOMBRE_CATEGORIA_2_FCOM, INSTR(NOMBRE_CATEGORIA_2_FCOM, '/') + LENGTH('/'))),"||","/")," ","-"),'-', ' ')) NOMBRE_CATEGORIA_2_FCOM,	
+URL_BANNER_2_GRUPO,
+BANNER_3_COD_GRUPO,
+BANNER_3_NOMBRE_CONJUNTO_GRUPO,
+upper(replace(replace(replace((SUBSTRING(NOMBRE_CATEGORIA_3_FCOM, INSTR(NOMBRE_CATEGORIA_3_FCOM, '/') + LENGTH('/'))),"||","/")," ","-"),'-', ' ')) NOMBRE_CATEGORIA_3_FCOM,
+URL_BANNER_3_GRUPO,
+BANNER_4_COD_GRUPO,
+BANNER_4_NOMBRE_CONJUNTO_GRUPO,	
+upper(replace(replace(replace((SUBSTRING(NOMBRE_CATEGORIA_4_FCOM, INSTR(NOMBRE_CATEGORIA_4_FCOM, '/') + LENGTH('/'))),"||","/")," ","-"),'-', ' ')) NOMBRE_CATEGORIA_4_FCOM,
+URL_BANNER_4_GRUPO,
+COD_CATEGORIA_COMPLEMENTARIA_1	,
+NOMBRE_CATEGORIA_COMPLEMENTARIA_1,
+upper(replace(replace(replace((SUBSTRING(NOMBRE_CATEGORIA_COMPLEMENTARIA_1_FCOM, INSTR(NOMBRE_CATEGORIA_COMPLEMENTARIA_1_FCOM, '/') + LENGTH('/'))),"||","/")," ","-"),'-', ' ')) NOMBRE_CATEGORIA_COMPLEMENTARIA_1_FCOM,	
+URL_BANNER_COMPLEMENTARIO_1_GRUPO, 
+COD_CATEGORIA_COMPLEMENTARIA_2,
+NOMBRE_CATEGORIA_COMPLEMENTARIA_2,	
+upper(replace(replace(replace((SUBSTRING(NOMBRE_CATEGORIA_COMPLEMENTARIA_2_FCOM, INSTR(NOMBRE_CATEGORIA_COMPLEMENTARIA_2_FCOM, '/') + LENGTH('/'))),"||","/")," ","-"),'-', ' ')) NOMBRE_CATEGORIA_COMPLEMENTARIA_2_FCOM,	
+URL_BANNER_COMPLEMENTARIO_2_GRUPO,
+COD_CATEGORIA_COMPLEMENTARIA_3,
+NOMBRE_CATEGORIA_COMPLEMENTARIA_3,	
+upper(replace(replace(replace((SUBSTRING(NOMBRE_CATEGORIA_COMPLEMENTARIA_3_FCOM, INSTR(NOMBRE_CATEGORIA_COMPLEMENTARIA_3_FCOM, '/') + LENGTH('/'))),"||","/")," ","-"),'-', ' ')) NOMBRE_CATEGORIA_COMPLEMENTARIA_3_FCOM, 
+URL_BANNER_COMPLEMENTARIO_3_GRUPO from 
+sod-cl-bi-sandbox.sbx_crm_eeduarlopez_desarrollos.calendario_mayo2024_hc
+
+
+--FINALMENTE EL ARCHIVO CSV LO IMPORTO EN EXCEL PARA QUE LAS TILDES APAREZCAN BIEN
